@@ -29,19 +29,70 @@
 #include <stdarg.h>
 #include <stdio.h>
 
+#include "FreeRTOS.h"
+#include "task.h"
+
 #include"ssd1306.h"
 
 // # Handle OLED dùng cho API tiện lợi kiểu Arduino
 static SSD1306_device_t* g_oled_easy = NULL;
+static uint8_t g_oled_easy_auto_update = 1;
+
+static uint8_t ssd1306_can_use_mutex(void)
+{
+#if (INCLUDE_xTaskGetSchedulerState == 1)
+	return (xTaskGetSchedulerState() != taskSCHEDULER_NOT_STARTED) ? 1U : 0U;
+#else
+	return 1U;
+#endif
+}
+
+// # Hàm nội bộ: gửi dữ liệu qua Safe I2C (có mutex) nếu có.
+// # Nếu chưa cấu hình safe_bus thì fallback về HAL trực tiếp để tương thích ngược.
+static HAL_StatusTypeDef ssd1306_i2c_mem_write(SSD1306_device_t* self,
+		uint16_t mem_addr,
+		uint8_t* data,
+		uint16_t size)
+{
+	I2C_HandleTypeDef* i2c_port;
+
+	if ((self == NULL) || (data == NULL) || (size == 0U))
+		return HAL_ERROR;
+
+	i2c_port = self->port;
+	if ((self->safe_bus != NULL) && (self->safe_bus->handle != NULL))
+		i2c_port = self->safe_bus->handle;
+
+	if ((self->safe_bus != NULL) && (ssd1306_can_use_mutex() != 0U))
+	{
+		return I2C_Safe_Write(self->safe_bus,
+				SSD1306_I2C_ADDR,
+				mem_addr,
+				I2C_MEMADD_SIZE_8BIT,
+				data,
+				size);
+	}
+
+	if (i2c_port == NULL)
+		return HAL_ERROR;
+
+	if(HAL_I2C_Mem_Write(i2c_port,
+			SSD1306_I2C_ADDR,
+			mem_addr,
+			I2C_MEMADD_SIZE_8BIT,
+			data,
+			size,
+			I2C_SAFE_HAL_TIMEOUT_MS) != HAL_OK)
+		return HAL_ERROR;
+
+	return HAL_OK;
+}
 
 // # Gửi 1 lệnh command cho SSD1306 qua I2C.
 // # SSD1306 dùng control byte 0x00 cho command.
 HAL_StatusTypeDef ssd1306_write_command(SSD1306_device_t* self, uint8_t command)
 {
-	if(HAL_I2C_Mem_Write(self->port,SSD1306_I2C_ADDR,0x00,1,&command,1,10) != HAL_OK)
-		return HAL_ERROR;
-
-	return HAL_OK;
+	return ssd1306_i2c_mem_write(self, 0x00, &command, 1);
 }
 
 // # Xóa buffer theo màu nền mặc định, sau đó update lên màn hình.
@@ -79,14 +130,16 @@ HAL_StatusTypeDef ssd1306_update_screen(SSD1306_device_t* self)
 	uint8_t i;
 
 	for (i = 0; i < 8; i++) {
-		ssd1306_write_command(self, 0xB0 + i);
+		if (ssd1306_write_command(self, 0xB0 + i) != HAL_OK) return HAL_ERROR;
 		/* # SH1106: set lower column start address with +2 offset */
-		ssd1306_write_command(self, 0x02);
+		if (ssd1306_write_command(self, 0x02) != HAL_OK) return HAL_ERROR;
 		/* # SH1106: set higher column start address */
-		ssd1306_write_command(self, 0x10);
+		if (ssd1306_write_command(self, 0x10) != HAL_OK) return HAL_ERROR;
 
-		if(HAL_I2C_Mem_Write(self->port,SSD1306_I2C_ADDR,0x40,1,
-			&self->buffer[self->width * i], self->width,100) != HAL_OK)
+		if(ssd1306_i2c_mem_write(self,
+				0x40,
+				&self->buffer[self->width * i],
+				self->width) != HAL_OK)
 			return HAL_ERROR;
 
 //		HAL_I2C_Mem_Write(&hi2c1,SSD1306_I2C_ADDR,0x40,1,&SSD1306_Buffer[SSD1306_WIDTH * i],SSD1306_WIDTH,100);
@@ -185,6 +238,13 @@ void ssd1306_set_cursor(SSD1306_device_t* self, uint8_t x, uint8_t y)
 	self->y = y;
 }
 
+// # Gắn/chuyển Safe I2C bus cho OLED runtime.
+void ssd1306_set_safe_bus(SSD1306_device_t* self, I2C_Safe_Bus_t* safe_bus)
+{
+	if (self == NULL) return;
+	self->safe_bus = safe_bus;
+}
+
 // # Khởi tạo thiết bị:
 // # 1) Cấp phát struct
 // # 2) Bind function pointers
@@ -192,6 +252,8 @@ void ssd1306_set_cursor(SSD1306_device_t* self, uint8_t x, uint8_t y)
 // # 4) Fill và update màn hình lần đầu
 SSD1306_device_t* ssd1306_init(SSD1306_device_init_t* init_dev_vals)
 {
+	if(init_dev_vals == NULL) return NULL;
+
 	HAL_Delay(100);
 
 	SSD1306_device_t* init_dev = (SSD1306_device_t*)calloc(1, sizeof(SSD1306_device_t));
@@ -206,7 +268,12 @@ SSD1306_device_t* ssd1306_init(SSD1306_device_init_t* init_dev_vals)
 	init_dev->string = &ssd1306_write_string;
 	init_dev->cursor = &ssd1306_set_cursor;
 
+	init_dev->safe_bus = init_dev_vals->safe_bus;
 	init_dev->port = init_dev_vals->port;
+
+	// # Nếu có safe_bus thì tự đồng bộ luôn port theo bus->handle.
+	if ((init_dev->safe_bus != NULL) && (init_dev->safe_bus->handle != NULL))
+		init_dev->port = init_dev->safe_bus->handle;
 
 	init_dev->width = init_dev_vals->width;
 	init_dev->height = init_dev_vals->height;
@@ -262,6 +329,19 @@ void ssd1306_easy_attach(SSD1306_device_t* self)
 	g_oled_easy = self;
 }
 
+// # Bật/tắt auto update cho easy_print/easy_printf.
+void ssd1306_easy_set_auto_update(uint8_t enable)
+{
+	g_oled_easy_auto_update = (enable != 0U) ? 1U : 0U;
+}
+
+// # Đẩy buffer ra màn hình khi đang dùng chế độ deferred update.
+HAL_StatusTypeDef ssd1306_easy_flush(void)
+{
+	if (g_oled_easy == NULL) return HAL_ERROR;
+	return ssd1306_update_screen(g_oled_easy);
+}
+
 // # Đặt cursor theo kiểu dễ dùng
 void ssd1306_easy_set_cursor(uint8_t x, uint8_t y)
 {
@@ -277,7 +357,10 @@ HAL_StatusTypeDef ssd1306_easy_print(const char* str)
 	if (ssd1306_write_string(g_oled_easy, (char*)str) != HAL_OK)
 		return HAL_ERROR;
 
-	return ssd1306_update_screen(g_oled_easy);
+	if (g_oled_easy_auto_update != 0U)
+		return ssd1306_update_screen(g_oled_easy);
+
+	return HAL_OK;
 }
 
 // # In format kiểu printf: "Lux: %u", value

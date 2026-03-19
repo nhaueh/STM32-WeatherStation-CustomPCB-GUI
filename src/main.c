@@ -28,6 +28,7 @@
 /* USER CODE BEGIN Includes */
 #include "ssd1306.h"
 #include "fonts.h"
+#include "i2c_safe.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -50,6 +51,11 @@
 /* USER CODE BEGIN PV */
 // # OLED handle - global để dùng từ freertos.c
 SSD1306_device_t* lcd = NULL;
+
+// # Safe I2C dùng chung cho toàn bộ thiết bị trên I2C1
+osMutexId g_i2c1_bus_mutex = NULL;
+I2C_Safe_Bus_t g_i2c1_safe_bus;
+osMutexDef(i2c1_bus_mutex);
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -98,16 +104,18 @@ int main(void)
   MX_USART2_UART_Init();
   MX_ADC1_Init();
   /* USER CODE BEGIN 2 */
+
+  // # Tạo mutex bus I2C1 dùng chung cho tất cả thiết bị I2C
+  g_i2c1_bus_mutex = osMutexCreate(osMutex(i2c1_bus_mutex));
+  if (g_i2c1_bus_mutex == NULL)
+  {
+    Error_Handler();
+  }
+  I2C_Safe_Init(&g_i2c1_safe_bus, &hi2c1, g_i2c1_bus_mutex, I2C_SAFE_HAL_TIMEOUT_MS);
   
-  // # Init OLED SH1106
-  SSD1306_device_init_t oled_init = {
-    .background = Black,
-    .font = &Font_7x10,
-    .width = 128,
-    .height = 64,
-    .port = &hi2c1
-  };
-  lcd = ssd1306_init(&oled_init);
+  // # OLED sẽ được init trong task (sau khi scheduler chạy)
+  // # để tránh các vấn đề lock mutex trước kernel start.
+  lcd = NULL;
 
   /* USER CODE END 2 */
 

@@ -27,6 +27,7 @@
 /* USER CODE BEGIN Includes */
 #include "ssd1306.h"
 #include "adc.h"
+#include "BH1750.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -48,6 +49,7 @@
 /* USER CODE BEGIN Variables */
 volatile uint16_t g_pa4_raw = 0;
 volatile uint32_t g_pa4_mv = 0;
+volatile uint16_t g_lux = 0;
 
 /* USER CODE END Variables */
 osThreadId defaultTaskHandle;
@@ -174,24 +176,52 @@ void oled(void const * argument)
   /* USER CODE BEGIN oled */
   // # Lấy handle OLED từ main
   extern SSD1306_device_t* lcd;
+  extern I2C_Safe_Bus_t g_i2c1_safe_bus;
+
+  if (lcd == NULL)
+  {
+    SSD1306_device_init_t oled_init = {
+      .background = Black,
+      .font = &Font_7x10,
+      .width = 128,
+      .height = 64,
+      .safe_bus = &g_i2c1_safe_bus,
+      .port = g_i2c1_safe_bus.handle
+    };
+
+    while (lcd == NULL)
+    {
+      lcd = ssd1306_init(&oled_init);
+      if (lcd == NULL)
+      {
+        osDelay(200);
+      }
+    }
+  }
 
   ssd1306_easy_attach(lcd);
+  ssd1306_easy_set_auto_update(0);
   
   /* Infinite loop */
   for(;;)
   {
-    ssd1306_clear(lcd);
+    (void)ssd1306_fill(lcd, lcd->background);
 
     ssd1306_easy_set_cursor(0, 0);
-    ssd1306_easy_print("ADC1 IN4 (PA4)");
+    (void)ssd1306_easy_print("ADC1 IN4 (PA4)");
 
     ssd1306_easy_set_cursor(0, 16);
-    ssd1306_easy_printf("RAW: %u", (unsigned)g_pa4_raw);
+    (void)ssd1306_easy_printf("RAW: %u", (unsigned)g_pa4_raw);
 
     ssd1306_easy_set_cursor(0, 32);
-    ssd1306_easy_printf("mV : %lu", g_pa4_mv);
+    (void)ssd1306_easy_printf("mV : %lu", g_pa4_mv);
 
-    osDelay(200);
+    ssd1306_easy_set_cursor(0, 48);
+    (void)ssd1306_easy_printf("Lux: %u", (unsigned)g_lux);
+
+    (void)ssd1306_easy_flush();
+
+    osDelay(300);
   }
   /* USER CODE END oled */
 }
@@ -206,6 +236,11 @@ void oled(void const * argument)
 void sensor(void const * argument)
 {
   /* USER CODE BEGIN sensor */
+  extern I2C_Safe_Bus_t g_i2c1_safe_bus;
+  uint8_t bh_poll_div = 0U;
+
+  (void)BH1750_easy_init(&g_i2c1_safe_bus, true);
+
   /* Infinite loop */
   for(;;)
   {
@@ -213,7 +248,15 @@ void sensor(void const * argument)
     g_pa4_raw = raw;
     g_pa4_mv = ((uint32_t)raw * 3300UL) / 4095UL;
 
-    osDelay(100);
+    bh_poll_div++;
+    if (bh_poll_div >= 3U)
+    {
+      bh_poll_div = 0U;
+
+      g_lux = BH1750_easy_read_lux_or_zero();
+    }
+
+    osDelay(300);
   }
   /* USER CODE END sensor */
 }

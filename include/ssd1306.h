@@ -30,6 +30,7 @@
 
 #include "stm32f1xx_hal.h"
 #include "fonts.h"
+#include "i2c_safe.h"
 
 #ifndef ssd1306
 #define ssd1306
@@ -62,7 +63,8 @@ typedef enum {
 // # - font: font đang dùng để viết text
 // # - width,height: kích thước panel
 // # - buffer: framebuffer 1-bit (W*H/8)
-// # - port: cổng I2C HAL
+// # - safe_bus: wrapper I2C có mutex dùng chung cho FreeRTOS
+// # - port: cổng I2C HAL (fallback nếu chưa dùng Safe I2C)
 // # - function pointers: API dạng OOP-style trong C
 typedef struct SSD1306_device SSD1306_device_t;
 struct SSD1306_device{
@@ -80,6 +82,7 @@ struct SSD1306_device{
 
 	uint8_t buffer [SSD1306_WIDTH * SSD1306_HEIGHT / 8];
 
+	I2C_Safe_Bus_t* safe_bus;
 	I2C_HandleTypeDef* port;
 
 	HAL_StatusTypeDef (*command)(SSD1306_device_t*, uint8_t);
@@ -99,6 +102,7 @@ typedef struct SSD1306_device_init{
 	uint8_t width;
 	uint8_t height;
 
+	I2C_Safe_Bus_t* safe_bus;
 	I2C_HandleTypeDef* port;
 }SSD1306_device_init_t;
 
@@ -132,6 +136,10 @@ HAL_StatusTypeDef ssd1306_write_string(SSD1306_device_t* self, char* str);
 // # set_cursor: đặt vị trí con trỏ text
 void ssd1306_set_cursor(SSD1306_device_t* self, uint8_t x, uint8_t y);
 
+// # set_safe_bus: gắn/chuyển bus Safe I2C cho SSD1306 runtime.
+// # Lưu ý: toàn bộ thiết bị I2C nên dùng cùng 1 mutex để tránh đụng bus.
+void ssd1306_set_safe_bus(SSD1306_device_t* self, I2C_Safe_Bus_t* safe_bus);
+
 // # API tiện dụng kiểu Arduino:
 // # - attach: gắn handle màn hình dùng toàn cục
 // # - set_cursor: đặt vị trí in
@@ -141,5 +149,7 @@ void ssd1306_easy_attach(SSD1306_device_t* self);
 void ssd1306_easy_set_cursor(uint8_t x, uint8_t y);
 HAL_StatusTypeDef ssd1306_easy_print(const char* str);
 HAL_StatusTypeDef ssd1306_easy_printf(const char* fmt, ...);
+void ssd1306_easy_set_auto_update(uint8_t enable);
+HAL_StatusTypeDef ssd1306_easy_flush(void);
 
 #endif
