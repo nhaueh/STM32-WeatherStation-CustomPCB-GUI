@@ -25,9 +25,12 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include <string.h>
+
 #include "ssd1306.h"
 #include "adc.h"
 #include "BH1750.h"
+#include "hc06.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -271,10 +274,42 @@ void sensor(void const * argument)
 void bluetooth(void const * argument)
 {
   /* USER CODE BEGIN bluetooth */
+  extern UART_HandleTypeDef huart1;
+  char cmd[32];
+  uint16_t tx_period_ms = 0U;
+
+  hc06_easy_attach(&huart1);
+  (void)hc06_easy_print("BT ready. Send 1=ON, 2=OFF\r\n");
+
   /* Infinite loop */
   for(;;)
   {
-    osDelay(1);
+    if (hc06_easy_read_line(cmd, sizeof(cmd)) > 0)
+    {
+      if (strcmp(cmd, "1") == 0)
+      {
+        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_15, GPIO_PIN_RESET);
+        (void)hc06_easy_print("PB15 ON\r\n");
+      }
+      else if (strcmp(cmd, "2") == 0)
+      {
+        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_15, GPIO_PIN_SET);
+        (void)hc06_easy_print("PB15 OFF\r\n");
+      }
+      else
+      {
+        (void)hc06_easy_print("Unknown cmd\r\n");
+      }
+    }
+
+    tx_period_ms += 2U;
+    if (tx_period_ms >= 1000U)
+    {
+      (void)hc06_easy_send_sensor(g_pa4_raw, g_pa4_mv, g_lux);
+      tx_period_ms = 0U;
+    }
+
+    osDelay(2);
   }
   /* USER CODE END bluetooth */
 }
@@ -317,6 +352,11 @@ void idle(void const * argument)
 
 /* Private application code --------------------------------------------------*/
 /* USER CODE BEGIN Application */
+
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+  hc06_easy_rx_irq_callback(huart);
+}
 
 /* USER CODE END Application */
 
