@@ -135,11 +135,11 @@ void MX_FREERTOS_Init(void) {
   sensorTaskHandle = osThreadCreate(osThread(sensorTask), NULL);
 
   /* definition and creation of Bluetoothtask */
-  osThreadDef(Bluetoothtask, bluetooth, osPriorityAboveNormal, 0, 256);
+  osThreadDef(Bluetoothtask, bluetooth, osPriorityLow, 0, 256);
   BluetoothtaskHandle = osThreadCreate(osThread(Bluetoothtask), NULL);
 
   /* definition and creation of wifitask */
-  osThreadDef(wifitask, wifi, osPriorityAboveNormal, 0, 384);
+  osThreadDef(wifitask, wifi, osPriorityLow, 0, 384);
   wifitaskHandle = osThreadCreate(osThread(wifitask), NULL);
 
   /* definition and creation of idleTask */
@@ -218,15 +218,12 @@ void oled(void const * argument)
     (void)ssd1306_easy_printf("Temp: %.1f C", g_bme280_data.temperature);
 
     ssd1306_easy_set_cursor(0, 12);
-    (void)ssd1306_easy_printf("Hum: %.1f %%", g_bme280_data.humidity);
+    (void)ssd1306_easy_printf("Pres: %.1f Pa", g_bme280_data.pressure);
 
     ssd1306_easy_set_cursor(0, 24);
-    (void)ssd1306_easy_printf("Pres: %.1f hPa", g_bme280_data.pressure);
-
-    ssd1306_easy_set_cursor(0, 36);
     (void)ssd1306_easy_printf("Lux: %u", (unsigned)g_lux);
 
-    ssd1306_easy_set_cursor(0, 48);
+    ssd1306_easy_set_cursor(0, 36);
     (void)ssd1306_easy_printf("ADC: %lu mV", g_pa4_mv);
 
     (void)ssd1306_easy_flush();
@@ -285,10 +282,14 @@ void bluetooth(void const * argument)
   /* USER CODE BEGIN bluetooth */
   extern UART_HandleTypeDef huart1;
   char cmd[32];
+  GPIO_PinState pb13_state = GPIO_PIN_SET;
+  GPIO_PinState pb14_state = GPIO_PIN_SET;
+  GPIO_PinState pb15_state = GPIO_PIN_SET;
+  GPIO_PinState pc13_state = GPIO_PIN_SET;
   uint16_t tx_period_ms = 0U;
 
   hc06_easy_attach(&huart1);
-  (void)hc06_easy_print("BT ready. Send 1=ON, 2=OFF\r\n");
+  (void)hc06_easy_print("BT ready. Send 1=ON, 2=OFF, PB13_TOGGLE/PB14_TOGGLE/PB15_TOGGLE/PC13_TOGGLE\r\n");
 
   /* Infinite loop */
   for(;;)
@@ -297,13 +298,39 @@ void bluetooth(void const * argument)
     {
       if (strcmp(cmd, "1") == 0)
       {
-        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_15, GPIO_PIN_RESET);
+        pb15_state = GPIO_PIN_RESET;
+        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_15, pb15_state);
         (void)hc06_easy_print("PB15 ON\r\n");
       }
       else if (strcmp(cmd, "2") == 0)
       {
-        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_15, GPIO_PIN_SET);
+        pb15_state = GPIO_PIN_SET;
+        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_15, pb15_state);
         (void)hc06_easy_print("PB15 OFF\r\n");
+      }
+      else if (strcmp(cmd, "PB13_TOGGLE") == 0)
+      {
+        pb13_state = (pb13_state == GPIO_PIN_SET) ? GPIO_PIN_RESET : GPIO_PIN_SET;
+        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_13, pb13_state);
+        (void)hc06_easy_print((pb13_state == GPIO_PIN_RESET) ? "PB13 ON\r\n" : "PB13 OFF\r\n");
+      }
+      else if (strcmp(cmd, "PB14_TOGGLE") == 0)
+      {
+        pb14_state = (pb14_state == GPIO_PIN_SET) ? GPIO_PIN_RESET : GPIO_PIN_SET;
+        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, pb14_state);
+        (void)hc06_easy_print((pb14_state == GPIO_PIN_RESET) ? "PB14 ON\r\n" : "PB14 OFF\r\n");
+      }
+      else if (strcmp(cmd, "PB15_TOGGLE") == 0)
+      {
+        pb15_state = (pb15_state == GPIO_PIN_SET) ? GPIO_PIN_RESET : GPIO_PIN_SET;
+        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_15, pb15_state);
+        (void)hc06_easy_print((pb15_state == GPIO_PIN_RESET) ? "PB15 ON\r\n" : "PB15 OFF\r\n");
+      }
+      else if (strcmp(cmd, "PC13_TOGGLE") == 0)
+      {
+        pc13_state = (pc13_state == GPIO_PIN_SET) ? GPIO_PIN_RESET : GPIO_PIN_SET;
+        HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, pc13_state);
+        (void)hc06_easy_print((pc13_state == GPIO_PIN_RESET) ? "PC13 ON\r\n" : "PC13 OFF\r\n");
       }
       else
       {
@@ -314,7 +341,15 @@ void bluetooth(void const * argument)
     tx_period_ms += 2U;
     if (tx_period_ms >= 1000U)
     {
+      // Send ADC data in old format
       (void)hc06_easy_send_sensor(g_pa4_raw, g_pa4_mv, g_lux);
+      
+      // Also send Temperature and Pressure in new format
+      char temp_pres_str[64];
+      snprintf(temp_pres_str, sizeof(temp_pres_str), "Temp: %.1f C\r\nPres: %.1f Pa\r\n", 
+               g_bme280_data.temperature, g_bme280_data.pressure);
+      (void)hc06_easy_print(temp_pres_str);
+      
       tx_period_ms = 0U;
     }
 
@@ -333,10 +368,23 @@ void bluetooth(void const * argument)
 void wifi(void const * argument)
 {
   /* USER CODE BEGIN wifi */
+  extern UART_HandleTypeDef huart2;
+
+  char *cmd1 = "AT\r\n";
+  char *cmd2 = "AT+CWMODE=1\r\n";
+  char *cmd3 = "AT+CWJAP=\"Minh Huyen\",\"Huyen1358\"\r\n";
+
   /* Infinite loop */
   for(;;)
   {
-    osDelay(1);
+    HAL_UART_Transmit(&huart2, (uint8_t *)cmd1, strlen(cmd1), 100);
+    osDelay(2000);
+
+    HAL_UART_Transmit(&huart2, (uint8_t *)cmd2, strlen(cmd2), 100);
+    osDelay(2000);
+
+    HAL_UART_Transmit(&huart2, (uint8_t *)cmd3, strlen(cmd3), 100);
+    osDelay(5000);
   }
   /* USER CODE END wifi */
 }
