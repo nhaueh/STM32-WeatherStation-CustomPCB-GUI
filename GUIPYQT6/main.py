@@ -29,6 +29,11 @@ import serial
 import serial.tools.list_ports
 import pyqtgraph as pg  # type: ignore[reportMissingImports]
 
+try:
+    import bluetooth as pybluez  # type: ignore[reportMissingImports]
+except Exception:
+    pybluez = None
+
 
 TELEMETRY_RE = re.compile(r"RAW=(\d+)\s+mV=(\d+)\s+LUX=(\d+)|Temp:\s*([\d.]+)\s*C|Pres:\s*([\d.]+)\s*Pa", re.IGNORECASE)
 
@@ -253,6 +258,88 @@ class SerialWorker(QThread):
             self.disconnected.emit()
 
 
+class BluetoothRfcommWorker(QThread):
+    connected = pyqtSignal(str)
+    disconnected = pyqtSignal()
+    line_received = pyqtSignal(str)
+    error = pyqtSignal(str)
+
+    def __init__(self):
+        super().__init__()
+        self._running = True
+        self._address = ""
+        self._channel = 1
+        self._tx_queue: queue.Queue[str] = queue.Queue()
+
+    def configure(self, address: str, channel: int):
+        self._address = address
+        self._channel = channel
+
+    def send_line(self, text: str):
+        self._tx_queue.put(text)
+
+    def stop(self):
+        self._running = False
+
+    def run(self):
+        if pybluez is None:
+            self.error.emit("Wireless Bluetooth requires pybluez. Install: pip install pybluez2")
+            self.disconnected.emit()
+            return
+
+        if not self._address:
+            self.error.emit("No Bluetooth device selected")
+            self.disconnected.emit()
+            return
+
+        sock = None
+        try:
+            sock = pybluez.BluetoothSocket(pybluez.RFCOMM)
+            sock.settimeout(2.0)
+            sock.connect((self._address, self._channel))
+            sock.settimeout(0.1)
+            self.connected.emit(f"{self._address} ch{self._channel}")
+
+            rx_buf = ""
+            while self._running:
+                try:
+                    data = sock.recv(512)
+                    if data:
+                        rx_buf += data.decode(errors="ignore")
+                        while "\n" in rx_buf:
+                            line, rx_buf = rx_buf.split("\n", 1)
+                            line = line.strip("\r\n ")
+                            if line:
+                                self.line_received.emit(line)
+                except Exception as ex:
+                    ex_name = ex.__class__.__name__.lower()
+                    if "timeout" not in ex_name:
+                        self.error.emit(f"Bluetooth runtime error: {ex}")
+                        break
+
+                try:
+                    while True:
+                        outgoing = self._tx_queue.get_nowait()
+                        sock.send((outgoing + "\r\n").encode())
+                except queue.Empty:
+                    pass
+                except Exception as ex:
+                    self.error.emit(f"Bluetooth send error: {ex}")
+                    break
+
+                self.msleep(10)
+
+        except Exception as ex:
+            self.error.emit(f"Bluetooth connect failed: {ex}")
+        finally:
+            if sock is not None:
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+            self.disconnected.emit()
+
+
 class TcpWorker(QThread):
     connected = pyqtSignal(str)
     disconnected = pyqtSignal()
@@ -342,6 +429,7 @@ class MainWindow(QMainWindow):
         self._title_color_index = 0
 
         self.serial_worker: SerialWorker | None = None
+        self.rfcomm_worker: BluetoothRfcommWorker | None = None
         self.tcp_worker: TcpWorker | None = None
         
         self._chart_max_points = 240
@@ -553,11 +641,20 @@ class MainWindow(QMainWindow):
         tab = QWidget()
         layout = QVBoxLayout(tab)
 
-        conn_group = QGroupBox("Bluetooth Serial")
+        conn_group = QGroupBox("Bluetooth Connection")
         conn_row = QHBoxLayout(conn_group)
+
+        self.cmb_bt_mode = QComboBox()
+        self.cmb_bt_mode.addItems(["Serial COM", "Wireless RFCOMM"])
 
         self.cmb_ports = QComboBox()
         self.btn_refresh_ports = QPushButton("Refresh Ports")
+
+        self.cmb_bt_devices = QComboBox()
+        self.btn_scan_bt_devices = QPushButton("Scan HC-06")
+        self.cmb_bt_channel = QComboBox()
+        self.cmb_bt_channel.addItems(["1", "2", "3", "4", "5"])
+        self.cmb_bt_channel.setCurrentText("1")
 
         self.cmb_baud = QComboBox()
         self.cmb_baud.addItems(["9600", "19200", "38400", "57600", "115200"])
@@ -567,11 +664,18 @@ class MainWindow(QMainWindow):
         self.btn_bt_disconnect = QPushButton("Disconnect")
         self.btn_bt_disconnect.setEnabled(False)
 
+        conn_row.addWidget(QLabel("Mode"))
+        conn_row.addWidget(self.cmb_bt_mode)
         conn_row.addWidget(QLabel("COM"))
         conn_row.addWidget(self.cmb_ports, 2)
         conn_row.addWidget(self.btn_refresh_ports)
         conn_row.addWidget(QLabel("Baud"))
         conn_row.addWidget(self.cmb_baud)
+        conn_row.addWidget(QLabel("Device"))
+        conn_row.addWidget(self.cmb_bt_devices, 2)
+        conn_row.addWidget(self.btn_scan_bt_devices)
+        conn_row.addWidget(QLabel("Ch"))
+        conn_row.addWidget(self.cmb_bt_channel)
         conn_row.addWidget(self.btn_bt_connect)
         conn_row.addWidget(self.btn_bt_disconnect)
 
@@ -594,6 +698,8 @@ class MainWindow(QMainWindow):
         layout.addWidget(conn_group)
         layout.addWidget(cmd_group)
         layout.addWidget(self.log_bt, 1)
+
+        self._on_bt_mode_changed(self.cmb_bt_mode.currentText())
 
         return tab
 
@@ -639,6 +745,8 @@ class MainWindow(QMainWindow):
 
     def _wire_events(self):
         self.btn_refresh_ports.clicked.connect(self.refresh_ports)
+        self.btn_scan_bt_devices.clicked.connect(self.scan_bt_devices)
+        self.cmb_bt_mode.currentTextChanged.connect(self._on_bt_mode_changed)
         self.btn_bt_connect.clicked.connect(self.connect_bt)
         self.btn_bt_disconnect.clicked.connect(self.disconnect_bt)
         self.btn_bt_send.clicked.connect(self.send_bt)
@@ -669,37 +777,141 @@ class MainWindow(QMainWindow):
             if idx >= 0:
                 self.cmb_ports.setCurrentIndex(idx)
 
-    def connect_bt(self):
+    def _on_bt_mode_changed(self, mode_text: str):
+        serial_mode = (mode_text == "Serial COM")
+        self.cmb_ports.setEnabled(serial_mode)
+        self.btn_refresh_ports.setEnabled(serial_mode)
+        self.cmb_baud.setEnabled(serial_mode or (mode_text == "Wireless RFCOMM" and pybluez is None))
+
+        self.cmb_bt_devices.setEnabled(not serial_mode)
+        self.btn_scan_bt_devices.setEnabled(not serial_mode)
+        self.cmb_bt_channel.setEnabled(not serial_mode)
+
+    def scan_bt_devices(self):
+        self.cmb_bt_devices.clear()
+
+        if pybluez is None:
+            # Fallback: discover paired Bluetooth serial COM ports (Windows)
+            ports = sorted(serial.tools.list_ports.comports(), key=lambda p: p.device)
+            hc06_ports = []
+            for p in ports:
+                desc = (p.description or "")
+                hwid = (p.hwid or "")
+                text = f"{desc} {hwid}".upper()
+                if "BLUETOOTH" in text or "HC-06" in text or "HC06" in text or "LINVOR" in text:
+                    hc06_ports.append(p)
+
+            for p in hc06_ports:
+                self.cmb_bt_devices.addItem(f"{p.device} - {p.description}", f"COM:{p.device}")
+
+            if self.cmb_bt_devices.count() == 0:
+                self.cmb_bt_devices.addItem("No HC-06 Bluetooth COM found", "")
+
+            QMessageBox.information(
+                self,
+                "Bluetooth",
+                "pybluez chưa có trên Python hiện tại. Đang dùng chế độ fallback qua Bluetooth COM đã pair sẵn.",
+            )
+            self.statusBar().showMessage("Scan complete (COM fallback mode)")
+            return
+
+        self.statusBar().showMessage("Scanning Bluetooth devices...")
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            devices = pybluez.discover_devices(duration=6, lookup_names=True)
+        except Exception as ex:
+            devices = []
+            self._append_log(self.log_bt, "BT", f"Scan error: {ex}")
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        hc06_devices = []
+        for addr, name in devices:
+            name_upper = (name or "").upper()
+            if "HC-06" in name_upper or "LINVOR" in name_upper or "HC06" in name_upper:
+                hc06_devices.append((addr, name or "Unknown"))
+
+        if not hc06_devices:
+            for addr, name in devices:
+                self.cmb_bt_devices.addItem(f"{name} [{addr}]", addr)
+            if self.cmb_bt_devices.count() == 0:
+                self.cmb_bt_devices.addItem("No Bluetooth devices found", "")
+            self.statusBar().showMessage("Scan complete (HC-06 not auto-detected)")
+            return
+
+        for addr, name in hc06_devices:
+            self.cmb_bt_devices.addItem(f"{name} [{addr}]", addr)
+
+        self.statusBar().showMessage(f"Found {len(hc06_devices)} HC-06 device(s)")
+
+    def _get_active_bt_worker(self):
         if self.serial_worker is not None:
+            return self.serial_worker
+        if self.rfcomm_worker is not None:
+            return self.rfcomm_worker
+        return None
+
+    def connect_bt(self):
+        if self._get_active_bt_worker() is not None:
             return
 
-        port = self.cmb_ports.currentData()
-        if not port:
-            QMessageBox.warning(self, "Bluetooth", "Please select a valid COM port")
-            return
+        mode_text = self.cmb_bt_mode.currentText()
+        if mode_text == "Serial COM":
+            port = self.cmb_ports.currentData()
+            if not port:
+                QMessageBox.warning(self, "Bluetooth", "Please select a valid COM port")
+                return
 
-        baud = int(self.cmb_baud.currentText())
+            baud = int(self.cmb_baud.currentText())
+            worker = SerialWorker()
+            worker.configure(port, baud)
+            worker.connected.connect(lambda x: self._on_bt_connected(x))
+            worker.disconnected.connect(self._on_bt_disconnected)
+            worker.line_received.connect(lambda line: self._on_line("BT", line))
+            worker.error.connect(lambda msg: self._append_log(self.log_bt, "BT", f"ERROR: {msg}"))
+            self.serial_worker = worker
+            worker.start()
+        else:
+            target = self.cmb_bt_devices.currentData()
+            if not target:
+                QMessageBox.warning(self, "Bluetooth", "Please scan and select HC-06 device/port")
+                return
 
-        worker = SerialWorker()
-        worker.configure(port, baud)
-        worker.connected.connect(lambda x: self._on_bt_connected(x))
-        worker.disconnected.connect(self._on_bt_disconnected)
-        worker.line_received.connect(lambda line: self._on_line("BT", line))
-        worker.error.connect(lambda msg: self._append_log(self.log_bt, "BT", f"ERROR: {msg}"))
-
-        self.serial_worker = worker
-        worker.start()
+            # If pybluez is unavailable, use COM fallback even in wireless mode.
+            if isinstance(target, str) and target.startswith("COM:"):
+                port = target.split(":", 1)[1]
+                baud = int(self.cmb_baud.currentText())
+                worker = SerialWorker()
+                worker.configure(port, baud)
+                worker.connected.connect(lambda x: self._on_bt_connected(f"Wireless(COM) {x}"))
+                worker.disconnected.connect(self._on_bt_disconnected)
+                worker.line_received.connect(lambda line: self._on_line("BT", line))
+                worker.error.connect(lambda msg: self._append_log(self.log_bt, "BT", f"ERROR: {msg}"))
+                self.serial_worker = worker
+                worker.start()
+            else:
+                channel = int(self.cmb_bt_channel.currentText())
+                worker = BluetoothRfcommWorker()
+                worker.configure(str(target), channel)
+                worker.connected.connect(lambda x: self._on_bt_connected(f"Wireless {x}"))
+                worker.disconnected.connect(self._on_bt_disconnected)
+                worker.line_received.connect(lambda line: self._on_line("BT", line))
+                worker.error.connect(lambda msg: self._append_log(self.log_bt, "BT", f"ERROR: {msg}"))
+                self.rfcomm_worker = worker
+                worker.start()
 
         self.btn_bt_connect.setEnabled(False)
         self.btn_bt_disconnect.setEnabled(True)
 
     def disconnect_bt(self):
-        if self.serial_worker is None:
+        worker = self._get_active_bt_worker()
+        if worker is None:
             return
 
-        self.serial_worker.stop()
-        self.serial_worker.wait(800)
+        worker.stop()
+        worker.wait(800)
         self.serial_worker = None
+        self.rfcomm_worker = None
 
         self.btn_bt_connect.setEnabled(True)
         self.btn_bt_disconnect.setEnabled(False)
@@ -713,10 +925,11 @@ class MainWindow(QMainWindow):
         self.edt_bt_cmd.clear()
 
     def send_bt_raw(self, text: str):
-        if self.serial_worker is None:
+        worker = self._get_active_bt_worker()
+        if worker is None:
             QMessageBox.information(self, "Bluetooth", "Bluetooth is not connected")
             return
-        self.serial_worker.send_line(text)
+        worker.send_line(text)
         self._append_log(self.log_bt, "BT-TX", text)
 
     def connect_wifi(self):
@@ -775,6 +988,8 @@ class MainWindow(QMainWindow):
 
     def _on_bt_disconnected(self):
         self._append_log(self.log_bt, "BT", "Disconnected")
+        self.serial_worker = None
+        self.rfcomm_worker = None
         self.btn_bt_connect.setEnabled(True)
         self.btn_bt_disconnect.setEnabled(False)
 
