@@ -31,6 +31,8 @@
 #include "adc.h"
 #include "BH1750.h"
 #include "hc06.h"
+#include "bme280.h"
+#include <stdio.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -53,6 +55,7 @@
 volatile uint16_t g_pa4_raw = 0;
 volatile uint32_t g_pa4_mv = 0;
 volatile uint16_t g_lux = 0;
+volatile BME280_Telemetry_t g_bme280_data;
 
 /* USER CODE END Variables */
 osThreadId defaultTaskHandle;
@@ -210,17 +213,21 @@ void oled(void const * argument)
   {
     (void)ssd1306_fill(lcd, lcd->background);
 
+
     ssd1306_easy_set_cursor(0, 0);
-    (void)ssd1306_easy_print("ADC1 IN4 (PA4)");
+    (void)ssd1306_easy_printf("Temp: %.1f C", g_bme280_data.temperature);
 
-    ssd1306_easy_set_cursor(0, 16);
-    (void)ssd1306_easy_printf("RAW: %u", (unsigned)g_pa4_raw);
+    ssd1306_easy_set_cursor(0, 12);
+    (void)ssd1306_easy_printf("Hum: %.1f %%", g_bme280_data.humidity);
 
-    ssd1306_easy_set_cursor(0, 32);
-    (void)ssd1306_easy_printf("mV : %lu", g_pa4_mv);
+    ssd1306_easy_set_cursor(0, 24);
+    (void)ssd1306_easy_printf("Pres: %.1f hPa", g_bme280_data.pressure);
+
+    ssd1306_easy_set_cursor(0, 36);
+    (void)ssd1306_easy_printf("Lux: %u", (unsigned)g_lux);
 
     ssd1306_easy_set_cursor(0, 48);
-    (void)ssd1306_easy_printf("Lux: %u", (unsigned)g_lux);
+    (void)ssd1306_easy_printf("ADC: %lu mV", g_pa4_mv);
 
     (void)ssd1306_easy_flush();
 
@@ -250,6 +257,8 @@ void sensor(void const * argument)
     uint16_t raw = adc_easy_read_pa4();
     g_pa4_raw = raw;
     g_pa4_mv = ((uint32_t)raw * 3300UL) / 4095UL;
+
+    g_bme280_data = bme280_easy_read(&g_i2c1_safe_bus);
 
     bh_poll_div++;
     if (bh_poll_div >= 3U)
